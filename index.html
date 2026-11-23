@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LAST ONE STANDING — Arena</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#080d18;color:#eef5ff;font-family:Arial,sans-serif;overflow:hidden}
+#game{position:fixed;inset:0;display:none}canvas{display:block}
+.panel{background:rgba(9,16,31,.92);border:1px solid #29415e;border-radius:16px;padding:22px;box-shadow:0 18px 60px #0008}
+#home{position:fixed;inset:0;display:grid;place-items:center;background:radial-gradient(ellipse at 50% 20%,#17345a,#080d18 65%)}
+#home .panel{width:min(440px,92vw)}h1{font-size:30px;letter-spacing:2px;margin:0 0 8px}h1 span{color:#45d8ff}
+.sub{color:#9fb3cc;margin:0 0 22px;font-size:14px}input,button{width:100%;padding:13px 14px;border-radius:9px;border:1px solid #344c68;background:#101d30;color:#fff;font-size:15px;margin:6px 0}
+button{background:linear-gradient(90deg,#087da8,#2864c8);border:0;font-weight:bold;cursor:pointer}button:disabled{opacity:.4;cursor:not-allowed}.secondary{background:#1b2a40}
+#err{color:#ff7b8a;min-height:20px;font-size:13px}#lobby{display:none;position:fixed;inset:0;place-items:center;background:#080d18dd}
+#lobby .panel{width:min(520px,94vw)}.roomcode{font-size:26px;letter-spacing:5px;color:#48ddff;font-weight:bold;text-align:center;padding:10px}
+#players{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:14px 0}.slot{padding:10px;background:#132239;border-radius:8px;color:#c5d5e8;font-size:14px}
+#hud{position:fixed;inset:0;pointer-events:none;display:none}.top{position:absolute;top:16px;left:16px;right:16px;display:flex;justify-content:space-between;gap:10px}
+.hudbox{background:#091426d9;border:1px solid #2a4664;border-radius:10px;padding:10px 14px;font-size:13px}
+#score{position:absolute;right:16px;top:70px;width:190px}.scoreline{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #23354b;font-size:12px}
+#crosshair{position:absolute;left:50%;top:50%;width:18px;height:18px;transform:translate(-50%,-50%);border:1px solid #fff;border-radius:50%;box-shadow:0 0 8px #3deaff}
+#notice{position:absolute;left:50%;top:15%;transform:translateX(-50%);font-size:22px;font-weight:bold;text-shadow:0 2px 10px #000}
+#help{position:absolute;bottom:14px;left:16px;color:#d3e2f5;background:#091426c9;padding:10px 13px;border-radius:8px;font-size:12px}
+#end{display:none;position:fixed;inset:0;place-items:center;background:#050914d9}.muted{color:#9fb3cc;font-size:13px}
+</style>
+</head>
+<body>
+<div id="home"><div class="panel">
+<h1>LAST ONE <span>STANDING</span></h1><p class="sub">A six-player online arena battle. Be the last survivor.</p>
+<input id="name" maxlength="16" placeholder="Enter your player name">
+<button id="create">CREATE NEW ROOM</button>
+<div style="text-align:center;color:#7189a6;margin:10px">— OR JOIN A FRIEND —</div>
+<input id="code" maxlength="6" placeholder="ROOM CODE">
+<button class="secondary" id="join">JOIN ROOM</button><div id="err"></div>
+<p class="muted">Share the room link with up to five friends. No account required.</p>
+</div></div>
+<div id="lobby"><div class="panel">
+<h1>ARENA <span>LOBBY</span></h1><p class="sub">Send this link to your friends. Maximum 6 players.</p>
+<div class="roomcode" id="roomcode"></div><button id="copy" class="secondary">COPY INVITE LINK</button>
+<div id="players"></div><p class="muted" id="lobbymsg">Waiting for players…</p>
+<button id="start">START BATTLE</button><button class="secondary" id="leave">LEAVE ROOM</button>
+</div></div>
+<div id="game"></div>
+<div id="hud"><div class="top"><div class="hudbox" id="status">FIGHT — LAST PLAYER ALIVE WINS</div><div class="hudbox" id="alive">ALIVE: 0/6</div></div><div id="score" class="hudbox"></div><div id="crosshair"></div><div id="notice"></div><div id="help">W A S D move · SPACE jump · MOUSE aim · LEFT CLICK shoot · ESC unlock mouse</div></div>
+<div id="end"><div class="panel" style="text-align:center;width:min(400px,92vw)"><h1 id="winner">VICTORY</h1><p class="sub">The arena has a new champion.</p><button onclick="location.reload()">BACK TO MENU</button></div></div>
+<script src="/socket.io/socket.io.js"></script>
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+const socket=io();
+const $=id=>document.getElementById(id);
+let myId=null,room=null,isHost=false,scene,camera,renderer,clock,me,players=new Map(),keys={},yaw=0,pitch=-.18,velY=0,onGround=true,locked=false,started=false,lastSend=0,shotCooldown=0;
+const mats=[0x42d9ff,0xff5d73,0xffd34e,0x8cff6b,0xb58aff,0xff9d45].map(c=>new THREE.MeshStandardMaterial({color:c,roughness:.55}));
+function err(s){$('err').textContent=s||''}
+function playerName(){return $('name').value.trim()||'Player'}
+function connectRoom(code){room=code; $('home').style.display='none';$('lobby').style.display='grid';$('roomcode').textContent=code;$('start').style.display=isHost?'block':'none';}
+$('create').onclick=()=>{err('');socket.emit('createRoom',{name:playerName()})};
+$('join').onclick=()=>{err('');socket.emit('joinRoom',{code:$('code').value.trim(),name:playerName()})};
+socket.on('connect',()=>myId=socket.id);
+socket.on('roomCreated',d=>{isHost=true;connectRoom(d.code)});
+socket.on('joinError',err);
+socket.on('roomState',state=>{room=state.code;renderLobby(state);if(started)syncPlayers(state)});
+socket.on('matchStarted',()=>startGame());
+function renderLobby(s){
+ $('players').innerHTML='';
+ for(let i=0;i<6;i++){const p=s.players[i];const el=document.createElement('div');el.className='slot';el.textContent=p?'● '+p.name:'○ Waiting for player';if(p)el.style.color='#'+p.color.toString(16).padStart(6,'0');$('players').append(el)}
+ $('lobbymsg').textContent=`${s.players.length}/6 players joined`;
+ $('start').disabled=s.players.length<2;
+}
+$('copy').onclick=async()=>{const link=location.origin+location.pathname+'?room='+room;try{await navigator.clipboard.writeText(link);$('copy').textContent='LINK COPIED!'}catch{$('copy').textContent=link}};
+$('start').onclick=()=>socket.emit('startMatch');
+$('leave').onclick=()=>location.href=location.pathname;
+if(new URLSearchParams(location.search).get('room')){$('code').value=new URLSearchParams(location.search).get('room').toUpperCase()}
+function makeArena(){
+ scene=new THREE.Scene();scene.background=new THREE.Color(0x080f20);scene.fog=new THREE.Fog(0x080f20,28,65);
+ camera=new THREE.PerspectiveCamera(70,innerWidth/innerHeight,.1,100);
+ renderer=new THREE.WebGLRenderer({antialias:true});renderer.setSize(innerWidth,innerHeight);renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.shadowMap.enabled=true;$('game').append(renderer.domElement);
+ scene.add(new THREE.HemisphereLight(0x9bcfff,0x182238,2));
+ const sun=new THREE.DirectionalLight(0xffffff,2.2);sun.position.set(-8,18,9);sun.castShadow=true;scene.add(sun);
+ const floor=new THREE.Mesh(new THREE.PlaneGeometry(52,52),new THREE.MeshStandardMaterial({color:0x17263a,roughness:.9}));floor.rotation.x=-Math.PI/2;floor.receiveShadow=true;scene.add(floor);
+ const grid=new THREE.GridHelper(50,50,0x28516e,0x20344a);grid.position.y=.015;scene.add(grid);
+ const wallmat=new THREE.MeshStandardMaterial({color:0x263b54,metalness:.25,roughness:.7});
+ function block(x,z,w,h,d){const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),wallmat);m.position.set(x,h/2,z);m.castShadow=true;m.receiveShadow=true;scene.add(m)}
+ block(0,-25,52,3,1);block(0,25,52,3,1);block(-25,0,1,3,52);block(25,0,1,3,52);
+ for(const [x,z] of [[-12,-10],[12,-10],[-12,10],[12,10],[0,-15],[0,15],[-18,0],[18,0]])block(x,z,3,2.4,3);
+ for(let i=0;i<8;i++){const pillar=new THREE.Mesh(new THREE.CylinderGeometry(.15,.15,5,12),new THREE.MeshStandardMaterial({color:0x2fd7ff,emissive:0x07516b}));pillar.position.set((i%4-1.5)*10,2.5,(i<4?-21:21));scene.add(pillar)}
+}
+function makeAvatar(id,color,name){
+ const group=new THREE.Group();const body=new THREE.Mesh(new THREE.CapsuleGeometry(.48,.9,4,8),mats[color]||mats[0]);body.position.y=1.05;body.castShadow=true;group.add(body);
+ const head=new THREE.Mesh(new THREE.SphereGeometry(.28,12,10),new THREE.MeshStandardMaterial({color:0xe6c7a7}));head.position.y=1.85;group.add(head);
+ const gun=new THREE.Mesh(new THREE.BoxGeometry(.16,.16,.9),new THREE.MeshStandardMaterial({color:0x202b3c,metalness:.7}));gun.position.set(.38,1.35,-.42);group.add(gun);
+ const ring=new THREE.Mesh(new THREE.TorusGeometry(.65,.035,6,24),new THREE.MeshBasicMaterial({color:0x45dcff}));ring.rotation.x=Math.PI/2;ring.position.y=.04;group.add(ring);
+ group.userData={body,gun,name};scene.add(group);return group;
+}
+function startGame(){
+ started=true;$('lobby').style.display='none';$('game').style.display='block';$('hud').style.display='block';
+ makeArena();clock=new THREE.Clock();me=makeAvatar(myId,0,playerName());me.visible=true;
+ renderer.domElement.addEventListener('click',()=>{if(!locked)renderer.domElement.requestPointerLock()});
+ document.addEventListener('pointerlockchange',()=>locked=document.pointerLockElement===renderer.domElement);
+ document.addEventListener('mousemove',e=>{if(locked){yaw-=e.movementX*.0025;pitch=Math.max(-.8,Math.min(.45,pitch-e.movementY*.002))}});
+ document.addEventListener('keydown',e=>{keys[e.code]=true;if(e.code==='Space')e.preventDefault()});
+ document.addEventListener('keyup',e=>keys[e.code]=false);
+ document.addEventListener('mousedown',e=>{if(e.button===0&&locked)shoot()});
+ addEventListener('resize',()=>{if(!camera)return;camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});
+ animate();
+}
+function syncPlayers(state){
+ const liveIds=new Set();
+ for(const p of state.players){liveIds.add(p.id);if(p.id===myId){if(me){me.position.set(p.x,0,p.z);me.rotation.y=p.rot}continue}
+  let obj=players.get(p.id);if(!obj){obj=makeAvatar(p.id,state.players.findIndex(q=>q.id===p.id),p.name);players.set(p.id,obj)}
+  obj.visible=p.alive;obj.position.set(p.x,0,p.z);obj.rotation.y=p.rot;
+ }
+ for(const [id,obj] of players)if(!liveIds.has(id)){scene.remove(obj);players.delete(id)}
+ $('alive').textContent=`ALIVE: ${state.players.filter(p=>p.alive).length}/6`;
+ $('score').innerHTML='<b>PLAYERS</b>'+state.players.map(p=>`<div class="scoreline"><span>${p.alive?'🟢':'⚫'} ${escapeHtml(p.name)}</span><b>${p.kills}</b></div>`).join('');
+}
+function escapeHtml(s){return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+socket.on('playerMoved',p=>{const o=players.get(p.id);if(o){o.position.set(p.x,0,p.z);o.rotation.y=p.rot}});
+socket.on('eliminated',d=>{$('notice').textContent=d.victim===myId?'YOU ARE ELIMINATED':`${d.victimName} eliminated by ${d.killerName}`;setTimeout(()=>$('notice').textContent='',2400)});
+socket.on('matchOver',d=>{$('end').style.display='grid';$('winner').textContent=d.winner===playerName()?'YOU WIN!':d.winner+' WINS!';document.exitPointerLock?.()});
+function shoot(){
+ const now=performance.now();if(now-shotCooldown<280)return;shotCooldown=now;
+ const dir=new THREE.Vector3(-Math.sin(yaw),0,-Math.cos(yaw));
+ socket.emit('shoot',{dx:dir.x,dz:dir.z});
+ const start=me.position.clone().add(new THREE.Vector3(0,1.4,0));const end=start.clone().add(dir.clone().multiplyScalar(22));
+ const geo=new THREE.BufferGeometry().setFromPoints([start,end]);const line=new THREE.Line(geo,new THREE.LineBasicMaterial({color:0x5beaff}));scene.add(line);setTimeout(()=>{scene.remove(line);geo.dispose()},90);
+}
+socket.on('shotEffect',d=>{if(d.id===myId)return;const a=new THREE.Vector3(d.x,1.4,d.z),b=a.clone().add(new THREE.Vector3(d.dx,0,d.dz).multiplyScalar(20));const g=new THREE.BufferGeometry().setFromPoints([a,b]);const l=new THREE.Line(g,new THREE.LineBasicMaterial({color:0xffd36a}));scene.add(l);setTimeout(()=>scene.remove(l),100)});
+function animate(){
+ requestAnimationFrame(animate);const dt=Math.min(clock.getDelta(),.04);
+ if(me){
+  const forward=new THREE.Vector3(-Math.sin(yaw),0,-Math.cos(yaw)),right=new THREE.Vector3(Math.cos(yaw),0,-Math.sin(yaw)),move=new THREE.Vector3();
+  if(keys.KeyW)move.add(forward);if(keys.KeyS)move.sub(forward);if(keys.KeyD)move.add(right);if(keys.KeyA)move.sub(right);
+  if(move.lengthSq())move.normalize().multiplyScalar(8*dt);
+  me.position.add(move);me.position.x=THREE.MathUtils.clamp(me.position.x,-23.5,23.5);me.position.z=THREE.MathUtils.clamp(me.position.z,-23.5,23.5);
+  if(keys.Space&&onGround){velY=7;onGround=false}velY-=18*dt;me.position.y+=velY*dt;if(me.position.y<=0){me.position.y=0;velY=0;onGround=true}
+  me.rotation.y=yaw;
+  const target=me.position.clone().add(new THREE.Vector3(0,1.2,0));const offset=new THREE.Vector3(Math.sin(yaw)*5,2.6-pitch*2,Math.cos(yaw)*5);camera.position.lerp(target.clone().add(offset),.18);camera.lookAt(target.clone().add(new THREE.Vector3(-Math.sin(yaw)*4,0,-Math.cos(yaw)*4)));
+  if(performance.now()-lastSend>50){socket.emit('move',{x:me.position.x,z:me.position.z,rot:yaw});lastSend=performance.now()}
+ }
+ renderer.render(scene,camera);
+}
+</script>
+</body></html>
